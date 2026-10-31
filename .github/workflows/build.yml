@@ -1,0 +1,50 @@
+name: Build AeroVerb SFX90 (Windows & macOS)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone JUCE 8.0.4
+        run: git clone --depth 1 --branch 8.0.4 https://github.com/juce-framework/JUCE.git JUCE
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build VST3, Standalone & DSP Tests
+        run: cmake --build build --config Release --parallel
+      - name: Run Automated DSP Verification Suite
+        run: ./build/Release/AeroFX90_Tests.exe
+      - name: Upload Windows VST3 & Standalone Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SFX90-Windows-x64
+          path: |
+            build/AeroFX90_artefacts/Release/VST3/SFX90.vst3
+            build/AeroFX90_artefacts/Release/Standalone/SFX90.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone JUCE 8.0.4
+        run: git clone --depth 1 --branch 8.0.4 https://github.com/juce-framework/JUCE.git JUCE
+      - name: Configure CMake (Universal Binary arm64 + x86_64)
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+      - name: Build AU, VST3, Standalone & DSP Tests
+        run: cmake --build build --config Release --parallel
+      - name: Run Automated DSP Verification Suite
+        run: ./build/AeroFX90_Tests
+      - name: Upload macOS Universal AU & VST3 Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SFX90-macOS-Universal
+          path: |
+            build/AeroFX90_artefacts/Release/AU/SFX90.component
+            build/AeroFX90_artefacts/Release/VST3/SFX90.vst3
+            build/AeroFX90_artefacts/Release/Standalone/SFX90.app

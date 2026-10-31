@@ -1,0 +1,25 @@
+# Build & CMake output
+build/
+out/
+cmake-build-*/
+
+# Cloned JUCE SDK (fetched or cloned locally during setup)
+JUCE/
+
+# Visual Studio / MSVC temporary files
+.vs/
+*.VC.db
+*.VC.opendb
+*.user
+*.suo
+*.aps
+*.pch
+*.pdb
+*.ilk
+*.exp
+*.obj
+*.lib
+
+# OS temporary files
+.DS_Store
+Thumbs.db
