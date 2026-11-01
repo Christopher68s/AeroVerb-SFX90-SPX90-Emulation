@@ -20,9 +20,11 @@ Faithful JUCE/C++ emulation of the **1985 Yamaha SPX90 / SPX90II Digital Multi-E
   - **Gate & Dynamics (`GATE REVERB`, `REVERSE GATE`, `REVERB & GATE`, `ADR-NOISE GATE`, `COMPRESSOR`)**
   - **Pitch Change (`PITCH CHANGE A/B/C/D`):** Dual-pointer circular splice pitch shifting with authentic latency, splice artifacts, `Pitch B` mono dual-voice, `Pitch C` stereo ±8 cent detune, and MIDI note tracking
   - **Freeze (`FREEZE A/B`), Pan (`AUTO PAN`, `TRIGGERED PAN`), and `PARAMETRIC EQ`**
-- **Dual-Mode Resizable GUI (`1420 px` Wide):**
-  - **Authentic 1985 1U Rack Panel (`1420 × 260 px`):** Glossy Studio Retro-Fi faceplate, smoked-acrylic display window (`AeroVerb / SFX90`), slanted red 7-segment LED memory display, negative-mode 5×7 dot-matrix LCD, 7-bar LED input meter, and tactile sculpted push-buttons (`#1~#30 READ ONLY` protection when storing to ROM).
-  - **Animated `STUDIO VIEW ▼ / ▲` Console Drawer (`1420 × 660 px`):** Smooth 60 FPS gliding drawer with 8 auto-binding, DAW-automatable parameter rotary knobs (`param1`–`param8`), converter controls, and the **Multi-Chain Routing Matrix** (`MOD -> PITCH -> DELAY -> REVERB`).
+- **Dual-Mode Fixed-Size GUI (`1760 px` Wide):**
+  - **Authentic 1985 1U Rack Panel (`1760 × 192 px`):** Glossy Studio Retro-Fi faceplate (cached to an image at the current display scale), smoked-acrylic display window (`AeroVerb / SFX90`), slanted red 7-segment LED memory display, 5×7 dot-matrix LCD, 7-bar LED input meter, Digital Symphony Instruments `.mfr` logo, and tactile sculpted push-buttons (`#1~#30 READ ONLY` protection when storing to ROM).
+  - **Animated `STUDIO VIEW ▼ / ▲` Console Drawer (`1760 × 582 px`):** Smooth 60 FPS gliding drawer with 8 auto-binding, DAW-automatable parameter rotary knobs (`param1`–`param8`), converter controls, and the **Multi-Chain Routing Matrix** (`MOD -> PITCH -> DELAY -> REVERB`).
+- **Real-time safe audio thread:** cached parameter pointers, no allocation or blocking locks in `processBlock` (`try_lock` + snapshot fallback), MIDI Program Change applied via `AsyncUpdater`, sample-rate-independent smoothing / duck / meter decay, NaN/Inf output guard, and a host tail length that follows the current Rev Time.
+- **Session persistence:** APVTS + active slot + edited working params + all 60 User RAM slots (`#31–#90`).
 
 ## Building Locally
 Double-click `Build_and_Install_SFX90.bat`, or run from a Developer Command Prompt:

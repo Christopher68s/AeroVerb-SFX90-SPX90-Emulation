@@ -5,6 +5,7 @@
 #include "Ym3807LfoBank.h"
 #include <vector>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <algorithm>
 
@@ -13,12 +14,14 @@ namespace aero {
 class EqPanFreezeEngine {
 public:
     static constexpr size_t kMaxFreezeSamples = 65536; // >2000 ms at 31.25 kHz
+    static constexpr size_t kLookaheadSize = 8192;     // >170 ms at 48 kHz
+    static constexpr size_t kLookaheadMask = kLookaheadSize - 1;
 
     EqPanFreezeEngine() {
         freezeBufL_.resize(kMaxFreezeSamples, 0.0f);
         freezeBufR_.resize(kMaxFreezeSamples, 0.0f);
-        lookaheadBufL_.resize(4096, 0.0f);
-        lookaheadBufR_.resize(4096, 0.0f);
+        lookaheadBufL_.resize(kLookaheadSize, 0.0f);
+        lookaheadBufR_.resize(kLookaheadSize, 0.0f);
     }
 
     void reset() {
@@ -47,6 +50,7 @@ public:
         freezeWriteIdx_ = 0;
         freezeReadPos_ = 0.0;
         prevManualTrig_ = false;
+        midiTriggered_.store(false, std::memory_order_relaxed);
     }
 
     void setConfig(BitDepthMode bitMode, RamModel ramModel) {
@@ -56,8 +60,8 @@ public:
 
     void triggerMidiNote(int midiNote, int velocity) {
         if (velocity > 0) {
-            lastMidiNote_ = midiNote;
-            midiTriggered_ = true;
+            lastMidiNote_.store(midiNote, std::memory_order_relaxed);
+            midiTriggered_.store(true, std::memory_order_relaxed);
         }
     }
 
@@ -91,7 +95,7 @@ public:
             default:
                 break;
         }
-        midiTriggered_ = false;
+        midiTriggered_.store(false, std::memory_order_relaxed);
     }
 
 private:
@@ -196,22 +200,24 @@ private:
         const float relMs  = std::clamp(p[4], 5.0f, 2000.0f);
         const bool midiTrg = (p[5] >= 0.5f);
 
-        float detSig = std::max(std::abs(l), std::abs(r));
-        if (midiTrg) {
-            detSig = midiTriggered_ ? 1.0f : 0.0f;
-        }
-
-        // Write to lookahead buffer so negative trigger delay anticipates audio transient
+        // Negative Trg Delay: delay audio path (lookahead). Positive Trg Delay: delay sidechain trigger.
         lookaheadBufL_[lookaheadWrite_] = l;
         lookaheadBufR_[lookaheadWrite_] = r;
-        int dlySamples = static_cast<int>(std::clamp(-trgDly, 0.0f, 100.0f) * 0.001f * sr);
-        size_t readIdx = (lookaheadWrite_ - static_cast<size_t>(dlySamples)) & 4095u;
-        lookaheadWrite_ = (lookaheadWrite_ + 1) & 4095u;
+        int audioDlySamples = (trgDly < 0.0f) ? static_cast<int>(std::clamp(-trgDly, 0.0f, 100.0f) * 0.001f * sr) : 0;
+        int trigDlySamples  = (trgDly > 0.0f) ? static_cast<int>(std::clamp( trgDly, 0.0f, 100.0f) * 0.001f * sr) : 0;
+        size_t audioReadIdx = (lookaheadWrite_ - static_cast<size_t>(audioDlySamples)) & kLookaheadMask;
+        size_t trigReadIdx  = (lookaheadWrite_ - static_cast<size_t>(trigDlySamples))  & kLookaheadMask;
+        lookaheadWrite_ = (lookaheadWrite_ + 1) & kLookaheadMask;
+
+        float detSig = std::max(std::abs(lookaheadBufL_[trigReadIdx]), std::abs(lookaheadBufR_[trigReadIdx]));
+        if (midiTrg) {
+            detSig = midiTriggered_.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
+        }
 
         updateAhrEnvelope(detSig, trgLvl, atkMs, holdMs, relMs, sr);
 
-        l = lookaheadBufL_[readIdx] * gateEnv_;
-        r = lookaheadBufR_[readIdx] * gateEnv_;
+        l = lookaheadBufL_[audioReadIdx] * gateEnv_;
+        r = lookaheadBufR_[audioReadIdx] * gateEnv_;
     }
 
     // #19 COMPRESSOR
@@ -224,11 +230,13 @@ private:
 
         lookaheadBufL_[lookaheadWrite_] = l;
         lookaheadBufR_[lookaheadWrite_] = r;
-        int dlySamples = static_cast<int>(std::clamp(-trgDly, 0.0f, 100.0f) * 0.001f * sr);
-        size_t readIdx = (lookaheadWrite_ - static_cast<size_t>(dlySamples)) & 4095u;
-        lookaheadWrite_ = (lookaheadWrite_ + 1) & 4095u;
+        int audioDlySamples = (trgDly < 0.0f) ? static_cast<int>(std::clamp(-trgDly, 0.0f, 100.0f) * 0.001f * sr) : 0;
+        int trigDlySamples  = (trgDly > 0.0f) ? static_cast<int>(std::clamp( trgDly, 0.0f, 100.0f) * 0.001f * sr) : 0;
+        size_t audioReadIdx = (lookaheadWrite_ - static_cast<size_t>(audioDlySamples)) & kLookaheadMask;
+        size_t trigReadIdx  = (lookaheadWrite_ - static_cast<size_t>(trigDlySamples))  & kLookaheadMask;
+        lookaheadWrite_ = (lookaheadWrite_ + 1) & kLookaheadMask;
 
-        float peak = std::max(std::abs(l), std::abs(r));
+        float peak = std::max(std::abs(lookaheadBufL_[trigReadIdx]), std::abs(lookaheadBufR_[trigReadIdx]));
         float atkCoeff = std::exp(-1.0f / std::max(1.0f, atkMs * 0.001f * sr));
         float relCoeff = std::exp(-1.0f / std::max(1.0f, relMs * 0.001f * sr));
 
@@ -244,8 +252,8 @@ private:
             gain = std::pow(over, -0.70f); // ~3.3:1 vintage digital compression curve
         }
         float makeup = 1.0f + 0.85f * sens;
-        l = std::clamp(lookaheadBufL_[readIdx] * gain * makeup, -1.0f, 1.0f);
-        r = std::clamp(lookaheadBufR_[readIdx] * gain * makeup, -1.0f, 1.0f);
+        l = std::clamp(lookaheadBufL_[audioReadIdx] * gain * makeup, -1.0f, 1.0f);
+        r = std::clamp(lookaheadBufR_[audioReadIdx] * gain * makeup, -1.0f, 1.0f);
     }
 
     // #25 FREEZE A & #26 FREEZE B
@@ -275,15 +283,17 @@ private:
             float semi = std::clamp(p[2], -12.0f, 12.0f);
             float fine = std::clamp(p[3], -100.0f, 100.0f);
             int baseKey = static_cast<int>(std::round(p[4]));
-            if (baseKey >= 36 && lastMidiNote_ >= 0) {
-                semi += static_cast<float>(lastMidiNote_ - baseKey);
+            int midiNote = lastMidiNote_.load(std::memory_order_relaxed);
+            if (baseKey >= 36 && midiNote >= 0) {
+                semi += static_cast<float>(midiNote - baseKey);
             }
             pitchRatio = std::pow(2.0f, (semi + fine * 0.01f) / 12.0f);
             pitchRatio = std::clamp(pitchRatio, 0.25f, 4.0f);
         }
 
         float peak = std::max(std::abs(l), std::abs(r));
-        bool trigEdge = (manualTrg && !prevManualTrig_) || midiTriggered_ ||
+        const bool midiTrig = midiTriggered_.load(std::memory_order_relaxed);
+        bool trigEdge = (manualTrg && !prevManualTrig_) || midiTrig ||
                         (autoMode && !isRecordingFreeze_ && !hasFrozenAudio_ && peak > trgLvl);
         prevManualTrig_ = manualTrg;
 
@@ -323,7 +333,8 @@ private:
     }
 
     void updateAhrEnvelope(float detSig, float thresh, float atkMs, float holdMs, float relMs, float sr) {
-        if ((detSig > thresh || midiTriggered_) && (gateState_ == GateState::Idle || gateState_ == GateState::Release)) {
+        if ((detSig > thresh || midiTriggered_.load(std::memory_order_relaxed)) &&
+            (gateState_ == GateState::Idle || gateState_ == GateState::Release)) {
             gateState_ = GateState::Attack;
         }
 
@@ -381,8 +392,8 @@ private:
     double freezeReadPos_ = 0.0;
     bool prevManualTrig_ = false;
 
-    int lastMidiNote_ = 60;
-    bool midiTriggered_ = false;
+    std::atomic<int> lastMidiNote_{60};
+    std::atomic<bool> midiTriggered_{false};
     BitDepthMode bitMode_ = BitDepthMode::Linear16Bit;
     RamModel ramModel_ = RamModel::Spx90_MkI;
 };

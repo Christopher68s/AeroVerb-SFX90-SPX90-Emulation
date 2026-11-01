@@ -74,17 +74,17 @@ const std::array<MetaArray, static_cast<size_t>(AlgorithmType::Count)> kAlgMetas
     }),
     // 6: DelayLR (#7 DELAY L,R)
     makeMeta({
-        {"Lch Delay",  "Lch DLY",  0.1f,  500.0f,100.0f, 1.0f, ParamFormat::FloatMilliseconds, true},
+        {"Lch Delay",  "Lch DLY",  0.1f,  500.0f,100.0f, 1.0f, ParamFormat::FloatMilliseconds, true, true},
         {"Lch F.B.",   "Lch F.B.", -99.f, 99.0f, 0.0f,   1.0f, ParamFormat::SignedPercent,     true},
-        {"Rch Delay",  "Rch DLY",  0.1f,  500.0f,200.0f, 1.0f, ParamFormat::FloatMilliseconds, true},
+        {"Rch Delay",  "Rch DLY",  0.1f,  500.0f,200.0f, 1.0f, ParamFormat::FloatMilliseconds, true, true},
         {"Rch F.B.",   "Rch F.B.", -99.f, 99.0f, 0.0f,   1.0f, ParamFormat::SignedPercent,     true},
         {"High Damp",  "HIGH",     0.1f,  1.0f,  1.0f,   0.1f, ParamFormat::FloatRatio,        true},
     }),
     // 7: StereoEcho (#8 STEREO ECHO)
     makeMeta({
-        {"Lch Delay",  "Lch DLY",  0.1f,  250.0f,170.0f, 1.0f, ParamFormat::FloatMilliseconds, true},
+        {"Lch Delay",  "Lch DLY",  0.1f,  250.0f,170.0f, 1.0f, ParamFormat::FloatMilliseconds, true, true},
         {"Lch F.B.",   "Lch F.B.", -99.f, 99.0f, 50.0f,  1.0f, ParamFormat::SignedPercent,     true},
-        {"Rch Delay",  "Rch DLY",  0.1f,  250.0f,170.0f, 1.0f, ParamFormat::FloatMilliseconds, true},
+        {"Rch Delay",  "Rch DLY",  0.1f,  250.0f,170.0f, 1.0f, ParamFormat::FloatMilliseconds, true, true},
         {"Rch F.B.",   "Rch F.B.", -99.f, 99.0f, 50.0f,  1.0f, ParamFormat::SignedPercent,     true},
         {"High Damp",  "HIGH",     0.1f,  1.0f,  0.8f,   0.1f, ParamFormat::FloatRatio,        true},
     }),
@@ -232,8 +232,8 @@ const std::array<MetaArray, static_cast<size_t>(AlgorithmType::Count)> kAlgMetas
     makeMeta({
         {"Rec Mode",   "REC MODE", 0.0f,  1.0f,  1.0f,   1.0f, ParamFormat::FreezeMode,        true},
         {"Trg Level",  "TRG LVL",  1.0f,  100.0f,50.0f,  1.0f, ParamFormat::IntPercent,        true},
-        {"Start Pt",   "START",    0.0f,  450.0f,0.0f,   5.0f, ParamFormat::FloatMilliseconds, true},
-        {"End Pt",     "END",      10.0f, 500.0f,500.0f, 5.0f, ParamFormat::FloatMilliseconds, true},
+        {"Start Pt",   "START",    0.0f,  450.0f,0.0f,   5.0f, ParamFormat::FloatMilliseconds, true, true},
+        {"End Pt",     "END",      10.0f, 500.0f,500.0f, 5.0f, ParamFormat::FloatMilliseconds, true, true},
         {"F.B. Gain",  "F.B.GAIN", 0.0f,  99.0f, 75.0f,  1.0f, ParamFormat::IntPercent,        true},
         {"Manual Trg", "TRIGGER",  0.0f,  1.0f,  0.0f,   1.0f, ParamFormat::OnOff,             true},
     }),
@@ -381,9 +381,7 @@ std::array<Spx90Program, kTotalMemorySlots> Spx90PresetDatabase::createDefaultMe
 
 std::string Spx90PresetDatabase::formatParamValue(float value, const ParamMeta& meta, RamModel ramModel) {
     char buf[32]{};
-    const float ramScale = (ramModel == RamModel::Spx90_MkII &&
-                            meta.format == ParamFormat::FloatMilliseconds &&
-                            meta.maxVal >= 250.0f) ? 4.0f : 1.0f;
+    const float ramScale = (ramModel == RamModel::Spx90_MkII && meta.scalesWithRam) ? 4.0f : 1.0f;
 
     switch (meta.format) {
         case ParamFormat::FloatSeconds:

@@ -591,29 +591,67 @@ void AeroFX90AudioProcessorEditor::timerCallback() {
         }
     }
 
-    bool isBypass = audioProcessor.apvts.getRawParameterValue("bypass")->load() >= 0.5f;
-    bypassBtn_.setToggleState(unitPowerOn_ && isBypass, juce::dontSendNotification);
+    const bool isBypass = audioProcessor.apvts.getRawParameterValue("bypass")->load(std::memory_order_relaxed) >= 0.5f;
+    const bool wantBypassToggle = unitPowerOn_ && isBypass;
+    if (bypassBtn_.getToggleState() != wantBypassToggle) {
+        bypassBtn_.setToggleState(wantBypassToggle, juce::dontSendNotification);
+    }
 
-    auto mode = audioProcessor.getPanelMode();
-    paramBtn_.setToggleState(unitPowerOn_ &&
+    const auto mode = audioProcessor.getPanelMode();
+    const bool wantParamToggle = unitPowerOn_ &&
         (mode == AeroFX90AudioProcessor::PanelDisplayMode::ParamSelect ||
-         mode == AeroFX90AudioProcessor::PanelDisplayMode::ProgramPlay),
-        juce::dontSendNotification);
+         mode == AeroFX90AudioProcessor::PanelDisplayMode::ProgramPlay);
+    if (paramBtn_.getToggleState() != wantParamToggle) {
+        paramBtn_.setToggleState(wantParamToggle, juce::dontSendNotification);
+    }
 
     const auto prog = audioProcessor.getCurrentActiveProgramCopy();
     if (audioProcessor.getActiveSlotIndex() != lastSyncedSlot_ || prog.algorithm != lastSyncedAlg_) {
         syncProgramKnobsFromProcessor();
-    } else {
+    } else if (showModernView_ || getHeight() > 194) {
         for (int i = 0; i < aero::kMaxProgramParams; ++i) {
-            if (!progParamSliders_[static_cast<size_t>(i)].isMouseButtonDown()) {
-                progParamSliders_[static_cast<size_t>(i)].setValue(
-                    prog.params[static_cast<size_t>(i)], juce::dontSendNotification);
-                progParamSliders_[static_cast<size_t>(i)].updateText();
+            auto& sl = progParamSliders_[static_cast<size_t>(i)];
+            if (!sl.isMouseButtonDown()) {
+                const double targetVal = static_cast<double>(prog.params[static_cast<size_t>(i)]);
+                if (std::abs(sl.getValue() - targetVal) > 1e-4) {
+                    sl.setValue(targetVal, juce::dontSendNotification);
+                    sl.updateText();
+                }
             }
         }
     }
 
-    repaint();
+    // Dirty check for the central display window (LCD, 7-seg, LED meter ladder)
+    std::string line1, line2;
+    audioProcessor.getLcdLines(line1, line2);
+
+    const bool isPending = audioProcessor.isPreviewPending();
+    const bool flashOff = isPending && ((blinkCounter_ / 12) % 2 == 1);
+    const int displaySlotNum = (isPending ? audioProcessor.getPreviewSlotIndex()
+                                          : audioProcessor.getActiveSlotIndex()) + 1;
+
+    const float peak = audioProcessor.getPeakMeterLevel();
+    const float db = (peak > 1e-5f) ? 20.0f * std::log10(peak) : -100.0f;
+    static constexpr float kThresholds[7] = {0.0f, -3.0f, -6.0f, -10.0f, -15.0f, -20.0f, -30.0f};
+    int meterMask = 0;
+    for (int i = 0; i < 7; ++i) {
+        if (db >= kThresholds[i]) meterMask |= (1 << i);
+    }
+    const bool overflow = audioProcessor.getOverflowLed();
+
+    if (line1 != lastLcdLine1_ || line2 != lastLcdLine2_ ||
+        displaySlotNum != lastDispSlot_ || flashOff != lastFlashOff_ ||
+        meterMask != lastMeterMask_ || overflow != lastOverflow_ ||
+        unitPowerOn_ != lastPowerOn_) {
+        lastLcdLine1_ = line1;
+        lastLcdLine2_ = line2;
+        lastDispSlot_ = displaySlotNum;
+        lastFlashOff_ = flashOff;
+        lastMeterMask_ = meterMask;
+        lastOverflow_ = overflow;
+        lastPowerOn_ = unitPowerOn_;
+        repaint(displayWindowArea_.toNearestInt().expanded(4));
+    }
 }
 
 void AeroFX90AudioProcessorEditor::resized() {
@@ -795,6 +833,83 @@ void AeroFX90AudioProcessorEditor::paint(juce::Graphics& g) {
 }
 
 void AeroFX90AudioProcessorEditor::drawRackFaceplate(juce::Graphics& g, juce::Rectangle<int> bounds) {
+    if (bounds.isEmpty()) return;
+
+    const float currentScale = std::max(1.0f, g.getInternalContext().getPhysicalPixelScaleFactor());
+    const int targetPxW = static_cast<int>(std::ceil(static_cast<float>(bounds.getWidth()) * currentScale));
+    const int targetPxH = static_cast<int>(std::ceil(static_cast<float>(bounds.getHeight()) * currentScale));
+
+    if (!cachedFaceplate_.isValid() ||
+        cachedFaceplate_.getWidth() != targetPxW ||
+        cachedFaceplate_.getHeight() != targetPxH ||
+        std::abs(cachedFaceplateScale_ - currentScale) > 0.01f) {
+        cachedFaceplate_ = juce::Image(juce::Image::ARGB, targetPxW, targetPxH, true);
+        cachedFaceplateScale_ = currentScale;
+        juce::Graphics imgG(cachedFaceplate_);
+        imgG.addTransform(juce::AffineTransform::scale(currentScale));
+        renderStaticRackFaceplate(imgG, bounds.withZeroOrigin());
+    }
+
+    g.drawImage(cachedFaceplate_, bounds.toFloat(), juce::RectanglePlacement::stretchToFit);
+
+    // Dynamic Display Elements inside the recessed window
+    // 2. Inside Window: 7-Bar Horizontal LED Meter Ladder (0, -3, -6, -10, -15, -20, -30)
+    drawLedMeterLadder(g, meterArea_, audioProcessor.getPeakMeterLevel(),
+                       audioProcessor.getOverflowLed(), unitPowerOn_);
+
+    // 3. Inside Window: Slanted Red 7-Segment MEMORY Readout
+    const bool isPending = audioProcessor.isPreviewPending();
+    const bool flashOff = isPending && ((blinkCounter_ / 12) % 2 == 1);
+    const int displaySlotNum = (isPending ? audioProcessor.getPreviewSlotIndex()
+                                          : audioProcessor.getActiveSlotIndex()) + 1;
+    drawSevenSegmentDisplay(g, sevenSegArea_, displaySlotNum, flashOff, unitPowerOn_);
+
+    // 4. Inside Window Right: True 5x7 Pixel Bitmap Dot-Matrix LCD
+    std::string line1, line2;
+    audioProcessor.getLcdLines(line1, line2);
+    drawDotMatrixLcd(g, lcdArea_, line1, line2, unitPowerOn_);
+
+    // 5. Smoked-Acrylic Specular Glass Reflection Overlay across the Display Window
+    {
+        juce::Graphics::ScopedSaveState state(g);
+        g.reduceClipRegion(displayWindowArea_.toNearestInt());
+
+        // Top glossy acrylic reflection band + diagonal light sweep
+        juce::Path glassSweep;
+        glassSweep.startNewSubPath(displayWindowArea_.getX(), displayWindowArea_.getY());
+        glassSweep.lineTo(displayWindowArea_.getRight(), displayWindowArea_.getY());
+        glassSweep.lineTo(displayWindowArea_.getRight() - 95.0f, displayWindowArea_.getY() + 52.0f);
+        glassSweep.lineTo(displayWindowArea_.getX(), displayWindowArea_.getY() + 26.0f);
+        glassSweep.closeSubPath();
+
+        juce::ColourGradient sweepGrad(juce::Colours::white.withAlpha(0.085f),
+                                       displayWindowArea_.getX(), displayWindowArea_.getY(),
+                                       juce::Colours::white.withAlpha(0.0f),
+                                       displayWindowArea_.getX(), displayWindowArea_.getY() + 54.0f, false);
+        g.setGradientFill(sweepGrad);
+        g.fillPath(glassSweep);
+
+        // Diagonal subtle glass streak on left and right
+        juce::Path streak;
+        float sx = displayWindowArea_.getX() + 185.0f;
+        streak.startNewSubPath(sx, displayWindowArea_.getY());
+        streak.lineTo(sx + 38.0f, displayWindowArea_.getY());
+        streak.lineTo(sx - 24.0f, displayWindowArea_.getBottom());
+        streak.lineTo(sx - 62.0f, displayWindowArea_.getBottom());
+        streak.closeSubPath();
+        g.setColour(juce::Colours::white.withAlpha(0.03f));
+        g.fillPath(streak);
+    }
+
+    // Inner specular rim on smoked-glass window
+    g.setColour(juce::Colours::white.withAlpha(0.16f));
+    g.drawHorizontalLine(static_cast<int>(displayWindowArea_.getY() + 1.0f),
+                         displayWindowArea_.getX() + 2.0f, displayWindowArea_.getRight() - 2.0f);
+    g.setColour(juce::Colour(0xff383d46));
+    g.drawRoundedRectangle(displayWindowArea_, 3.0f, 1.5f);
+}
+
+void AeroFX90AudioProcessorEditor::renderStaticRackFaceplate(juce::Graphics& g, juce::Rectangle<int> bounds) {
     auto fBounds = bounds.toFloat();
 
     // Rich Satin-Gloss Black Anodized 1U Rack Chassis with vertical sheen
@@ -865,9 +980,8 @@ void AeroFX90AudioProcessorEditor::drawRackFaceplate(juce::Graphics& g, juce::Re
     g.drawText("10", inputLevelSlider_.getRight() - 22, inputLevelSlider_.getBottom() - 2, 20, 12, juce::Justification::centred);
 
     // =========================================================================
-    // Center Recessed Glossy Smoked-Acrylic Display Window
+    // Center Recessed Glossy Smoked-Acrylic Display Window (Static Backdrop)
     // =========================================================================
-    // Outer chamfered bezel shadow & metallic rim
     g.setColour(juce::Colour(0xff020304));
     g.fillRoundedRectangle(displayWindowArea_.expanded(3.0f), 4.0f);
 
@@ -879,61 +993,6 @@ void AeroFX90AudioProcessorEditor::drawRackFaceplate(juce::Graphics& g, juce::Re
 
     // 1. Inside Window Left: AeroVerb / SFX90 Badge
     drawAeroVerbSfx90Badge(g, badgeArea_);
-
-    // 2. Inside Window: 7-Bar Horizontal LED Meter Ladder (0, -3, -6, -10, -15, -20, -30)
-    drawLedMeterLadder(g, meterArea_, audioProcessor.getPeakMeterLevel(),
-                       audioProcessor.getOverflowLed(), unitPowerOn_);
-
-    // 3. Inside Window: Slanted Red 7-Segment MEMORY Readout
-    const bool isPending = audioProcessor.isPreviewPending();
-    const bool flashOff = isPending && ((blinkCounter_ / 12) % 2 == 1);
-    const int displaySlotNum = (isPending ? audioProcessor.getPreviewSlotIndex()
-                                          : audioProcessor.getActiveSlotIndex()) + 1;
-    drawSevenSegmentDisplay(g, sevenSegArea_, displaySlotNum, flashOff, unitPowerOn_);
-
-    // 4. Inside Window Right: True 5x7 Pixel Bitmap Dot-Matrix LCD
-    std::string line1, line2;
-    audioProcessor.getLcdLines(line1, line2);
-    drawDotMatrixLcd(g, lcdArea_, line1, line2, unitPowerOn_);
-
-    // 5. Smoked-Acrylic Specular Glass Reflection Overlay across the Display Window
-    {
-        juce::Graphics::ScopedSaveState state(g);
-        g.reduceClipRegion(displayWindowArea_.toNearestInt());
-
-        // Top glossy acrylic reflection band + diagonal light sweep
-        juce::Path glassSweep;
-        glassSweep.startNewSubPath(displayWindowArea_.getX(), displayWindowArea_.getY());
-        glassSweep.lineTo(displayWindowArea_.getRight(), displayWindowArea_.getY());
-        glassSweep.lineTo(displayWindowArea_.getRight() - 95.0f, displayWindowArea_.getY() + 52.0f);
-        glassSweep.lineTo(displayWindowArea_.getX(), displayWindowArea_.getY() + 26.0f);
-        glassSweep.closeSubPath();
-
-        juce::ColourGradient sweepGrad(juce::Colours::white.withAlpha(0.085f),
-                                       displayWindowArea_.getX(), displayWindowArea_.getY(),
-                                       juce::Colours::white.withAlpha(0.0f),
-                                       displayWindowArea_.getX(), displayWindowArea_.getY() + 54.0f, false);
-        g.setGradientFill(sweepGrad);
-        g.fillPath(glassSweep);
-
-        // Diagonal subtle glass streak on left and right
-        juce::Path streak;
-        float sx = displayWindowArea_.getX() + 185.0f;
-        streak.startNewSubPath(sx, displayWindowArea_.getY());
-        streak.lineTo(sx + 38.0f, displayWindowArea_.getY());
-        streak.lineTo(sx - 24.0f, displayWindowArea_.getBottom());
-        streak.lineTo(sx - 62.0f, displayWindowArea_.getBottom());
-        streak.closeSubPath();
-        g.setColour(juce::Colours::white.withAlpha(0.03f));
-        g.fillPath(streak);
-    }
-
-    // Inner specular rim on smoked-glass window
-    g.setColour(juce::Colours::white.withAlpha(0.16f));
-    g.drawHorizontalLine(static_cast<int>(displayWindowArea_.getY() + 1.0f),
-                         displayWindowArea_.getX() + 2.0f, displayWindowArea_.getRight() - 2.0f);
-    g.setColour(juce::Colour(0xff383d46));
-    g.drawRoundedRectangle(displayWindowArea_, 3.0f, 1.5f);
 
     // 6. Far Right 1/4" Phone Jacks (MEMORY TRIGGER & BYPASS)
     float lineStartX = static_cast<float>(midiTrigBtn_.getRight() + 4);
@@ -1023,7 +1082,7 @@ void AeroFX90AudioProcessorEditor::drawManufacturerBadge(juce::Graphics& g, juce
     for (int i = 0; i < kLine1Len; ++i) {
         juce::String chStr = juce::String::charToString(static_cast<juce::juce_wchar>(line1Str[i]));
         gaB.addLineOfText(fontB, chStr, curX, line1BaselineY);
-        curX += fontB.getStringWidthFloat(chStr) + ((i < kLine1Len - 1) ? kLetterSpacingB : 0.0f);
+        curX += juce::GlyphArrangement::getStringWidth(fontB, chStr) + ((i < kLine1Len - 1) ? kLetterSpacingB : 0.0f);
     }
 
     auto bBounds = gaB.getBoundingBox(0, -1, true);
@@ -1037,7 +1096,7 @@ void AeroFX90AudioProcessorEditor::drawManufacturerBadge(juce::Graphics& g, juce
     float sumSpanAdv = 0.0f;
     for (int i = 0; i < kLine2Len; ++i) {
         juce::String chStr = juce::String::charToString(static_cast<juce::juce_wchar>(line2Str[i]));
-        spanAdv[static_cast<size_t>(i)] = fontI.getStringWidthFloat(chStr);
+        spanAdv[static_cast<size_t>(i)] = juce::GlyphArrangement::getStringWidth(fontI, chStr);
         sumSpanAdv += spanAdv[static_cast<size_t>(i)];
     }
 

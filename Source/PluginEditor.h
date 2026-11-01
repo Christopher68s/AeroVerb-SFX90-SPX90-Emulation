@@ -38,6 +38,7 @@ private:
     void syncProgramKnobsFromProcessor();
 
     void drawRackFaceplate(juce::Graphics& g, juce::Rectangle<int> bounds);
+    void renderStaticRackFaceplate(juce::Graphics& g, juce::Rectangle<int> bounds);
     void drawAeroVerbSfx90Badge(juce::Graphics& g, juce::Rectangle<float> badgeArea);
     void drawSevenSegmentDisplay(juce::Graphics& g, juce::Rectangle<float> area, int number,
                                  bool flashOff, bool powerOn);
@@ -146,6 +147,18 @@ private:
 
     juce::Typeface::Ptr juraRegularTypeface_;
     juce::Typeface::Ptr juraSemiBoldTypeface_;
+
+    juce::Image cachedFaceplate_;
+    float cachedFaceplateScale_ = 0.0f;
+
+    // Dirty-tracking state for 60Hz timerCallback
+    std::string lastLcdLine1_;
+    std::string lastLcdLine2_;
+    int lastDispSlot_ = -1;
+    bool lastFlashOff_ = false;
+    int lastMeterMask_ = -1;
+    bool lastOverflow_ = false;
+    bool lastPowerOn_ = true;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AeroFX90AudioProcessorEditor)
 };

@@ -1,5 +1,14 @@
 # SFX90 / AeroVerb — Audit Report
 
+## Status (2026-11-01)
+
+- **Done:** findings 1-16 fixed; #17 test coverage extended. DSP suite is now **39/39 passing** (`build/AeroFX90_Tests.exe`). VST3 + Standalone rebuilt, VST3 installed to `%LOCALAPPDATA%\Programs\Common\VST3\SFX90.vst3`. See "Fixes applied (findings 5-17)" at the end.
+- **Partially open:** #16 MIDI notes are still applied at block start (not sample-accurate). #18 the spec brief still has historic drift items (filter order/Q, fixed-point, file names) — README now matches the code.
+- **Not examined yet:** AU/macOS build, a VST3 validator run, behaviour inside a real DAW, the logo at several display scales.
+- **Leftover junction `C:\ss`:** removed.
+
+> **Update — findings 1-4 were fixed first, 5-17 in the second pass.** The original findings below are kept for reference.
+
 Scope: the five areas in §6 of `SFX90_Technical_Specification_and_Audit_Brief.md`, plus a spec-vs-code comparison.
 Method: full read of `Source/` (processor, editor, DSP engine, converter, all four algorithm files, preset DB, tests, CMake, CI), then a standalone probe compiled against the real DSP headers (MSVC, `/O2`, not part of the repo) to confirm the numeric claims.
 
@@ -176,4 +185,45 @@ Badge accuracy: it is drawn from vector paths, so it scales cleanly, but the `×
 - **DRAM addressing:** power-of-two mask, read delay clamped to 1…62500 samples; no out-of-range access found.
 - **Window sizing:** `setResizable(false, false)` and 60 Hz drawer animation as described.
 
+---
+
+## Fixes applied (findings 1-4)
+
+| # | Change | Where |
+|---|--------|-------|
+| 1 | `quantizeSample()` split into `adcStage()` (drive, saturation, overflow flag, noise, quantise) and `dacStage()` (noise + quantise only). Drive now acts once, so +6 dB drive gives ≈ +6 dB wet gain (an input gain, as intended), not ≈ +12 dB. | `Source/DSP/ConverterEngine.h` |
+| 2 | Saturator input is held at its peak (`1/sqrt(0.22)` = 2.132) before `x/(1+0.22x²)`, so the curve is monotonic. Behaviour below the knee is unchanged. | `Source/DSP/ConverterEngine.h` |
+| 3 | Pitch Change A takes its feedback tap before the tone filter; loop gain is now ≤ 0.891 × (window sum ≤ 1). | `Source/DSP/PitchAlgorithms.h` |
+| 4 | State now saves user RAM #31-#90 (`<UserBank>`), restores it with validation (slot range, algorithm range, finite values, clamping to each parameter's range, 15-char names), keeps the host-restored Balance/Out Level (new `recallSlot(slot, applyProgramLevels)`), clamps restored `workParam*` values, and keeps the bank out of the APVTS tree so it is not duplicated on each save. States saved by older builds still load (no bank = default RAM). | `Source/PluginProcessor.cpp/.h` |
+
+Regression tests added to `Source/Tests/DspVerificationMain.cpp` (suite is now 35 checks):
+- TEST 4: drive acts once (0 / +6 / +12 dB → -0.01 / +5.98 / +11.94 dB measured).
+- TEST 5: converter output is monotonic at +12 dB drive.
+- TEST 6: Pitch Change A at 99 % feedback / 0 st decays (peak in the 5th second 0.0001, was ≈ 1.01).
+
+Behaviour change to be aware of: wet level now rises by the drive amount (previously twice that), and the second saturation pass is gone, so presets at non-zero Converter Drive will sound lower/cleaner than before.
+
 Not examined: AU/macOS build, VST3 validator run in a host, real-time behaviour under an actual DAW, 192 kHz float32 biquad noise at 20 Hz (suspected, not measured).
+
+
+---
+
+## Fixes applied (findings 5-17)
+
+| # | Change | Where |
+|---|--------|-------|
+| 5 | `std::atomic<float>*` / `RangedAudioParameter*` cached in the constructor (no string lookups or allocations per block). `syncDspFromState()` uses `std::try_to_lock` and falls back to a `cachedAudioProgram_` snapshot, so the audio thread never blocks. MIDI Program Change is stored in `pendingMidiProgramChange_` and recalled on the message thread via `AsyncUpdater` (the program is applied immediately on the audio thread only if the lock is free; no host notification from the audio thread). | `PluginProcessor.h/.cpp` |
+| 6 | Slot indices, cursors, `programModified_`, `panelMode_`, `lastMidiNoteReceived_`, tail length are `std::atomic`. Engine MIDI trigger state (`lastMidiNote_`, `midiTriggered_`, `activeMidiNote_`) is atomic and cleared on `reset()`. | `PluginProcessor.h`, `EqPanFreezeAlgorithms.h`, `PitchAlgorithms.h` |
+| 7 | `pushingToApvtsCount_` guard: while a recall/edit is pushing values to APVTS, `syncDspFromState()` does not treat the difference as host automation; `lastPushedNormParams_` is re-read after `setValueNotifyingHost`. The engine only ducks/clears tanks when the *algorithm* changes (not `memoryNumber`). | `PluginProcessor.cpp`, `Spx90DspEngine.cpp` |
+| 8 | `ParamMeta::scalesWithRam` — only Delay L,R / Stereo Echo delays and Freeze start/end scale ×4 on SPX90II; the formatter uses the same flag. | `Spx90Types.h`, `Spx90PresetDatabase.cpp` |
+| 9 | Comb gain clamp raised 0.985 → 0.9975, no truncation in the comb write, so 20-99 s Rev Time keeps lengthening. `getTailLengthSeconds()` follows the current program (Rev Time + 1 s for reverbs, 10 s for delays, 5 s otherwise). | `ReverbAlgorithms.h`, `PluginProcessor.cpp` |
+| 10 | Smoothing coefficient and recall fade step derived from host sample rate in `prepare()`. | `Spx90DspEngine.cpp` |
+| 11 | Static faceplate (chassis, ears, legends, window backdrop, AeroVerb badge, jacks, `.mfr` logo) cached into a `juce::Image` at the physical pixel scale and redrawn only on size/scale change. `timerCallback()` tracks LCD lines, 7-seg digit/blink, meter segment mask, overflow, power and only repaints the display window when one of them changes; toggle states and Studio knobs are only updated when their values differ. `Font::getStringWidthFloat` (C4996) replaced with `GlyphArrangement::getStringWidth`. | `PluginEditor.h/.cpp` |
+| 12 | Peak meter decay is time-based (~180 ms), independent of buffer size. | `Spx90DspEngine.cpp` |
+| 13 | Comb modulation moves a fractional, linearly interpolated read pointer instead of changing the wrap length. | `ReverbAlgorithms.h` |
+| 14 | `std::isfinite` output guard resets the engine on NaN/Inf; restored params clamped (with #4). | `Spx90DspEngine.cpp` |
+| 15 | Bypass and mono-input switch with short crossfades; converter and tanks keep running while bypassed. | `Spx90DspEngine.cpp` |
+| 16 | Positive Trg Delay now delays the trigger; negative delays the audio (look-ahead). Look-ahead buffers enlarged to 8192 samples so 100 ms at 48 kHz no longer wraps. *Still open:* sample-accurate MIDI. | `EqPanFreezeAlgorithms.h` |
+| 17 | New tests 7-10: MkI/MkII `scalesWithRam` formatting, REV 1 HALL tail at 2/15/50/99 s, ADR gate Trg Delay polarity, Multi-Chain stress. Suite: 39 checks. | `Source/Tests/DspVerificationMain.cpp` |
+
+Test 8 result (tail RMS at 2.5–3.0 s): 2 s → 0.0001, 15 s → 0.102, 50 s → 0.234, 99 s → 0.278 (previously 30 s and 99 s were identical).

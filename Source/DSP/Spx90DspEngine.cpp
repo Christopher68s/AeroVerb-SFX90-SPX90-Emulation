@@ -6,7 +6,10 @@
 namespace aero {
 
 void Spx90DspEngine::prepare(double hostSampleRate) {
-    converter_.prepare(hostSampleRate);
+    hostSampleRate_ = std::max(8000.0, hostSampleRate);
+    smoothCoeff_ = 1.0f - std::exp(-1.0f / static_cast<float>(0.0055 * hostSampleRate_));
+    fadeStep_ = 1.0f / static_cast<float>(0.0065 * hostSampleRate_);
+    converter_.prepare(hostSampleRate_);
     currentProgram_ = Spx90PresetDatabase::getRomPreset(14); // Default #15 SYMPHONIC
     hasInitializedProgram_ = false;
     hasPendingProgramSwitch_ = false;
@@ -26,6 +29,8 @@ void Spx90DspEngine::reset() {
     smoothInputGain_ = inputGainLinear_;
     smoothWetMix_ = std::clamp(currentProgram_.balance, 0.0f, 100.0f) * 0.01f;
     smoothOutGain_ = std::clamp(currentProgram_.outLevel, 0.0f, 100.0f) * 0.01f;
+    smoothBypassEnv_ = hardwareBypass_ ? 0.0f : 1.0f;
+    smoothMonoMix_ = monoInputMode_ ? 1.0f : 0.0f;
     peakInputLevel_.store(0.0f, std::memory_order_relaxed);
     overflowLed_.store(false, std::memory_order_relaxed);
     overflowHoldSamples_ = 0;
@@ -68,16 +73,15 @@ void Spx90DspEngine::setActiveProgram(const Spx90Program& program) {
         return;
     }
 
-    // If switching to a different memory slot or algorithm while running, trigger click-free VCA duck & tank clear
-    if (program.algorithm != currentProgram_.algorithm ||
-        program.memoryNumber != currentProgram_.memoryNumber) {
+    // Only trigger VCA duck & tank clear when the algorithm architecture changes (not on STORE / memoryNumber change)
+    const AlgorithmType activeTargetAlg = hasPendingProgramSwitch_ ? pendingProgram_.algorithm : currentProgram_.algorithm;
+    if (program.algorithm != activeTargetAlg) {
         pendingProgram_ = program;
         hasPendingProgramSwitch_ = true;
+    } else if (hasPendingProgramSwitch_) {
+        pendingProgram_ = program;
     } else {
         currentProgram_ = program;
-        if (hasPendingProgramSwitch_) {
-            pendingProgram_ = program;
-        }
     }
 }
 
@@ -216,20 +220,22 @@ void Spx90DspEngine::processBlock(float* leftChannel, float* rightChannel, int n
     if (!leftChannel || numSamples <= 0) return;
 
     float blockPeak = 0.0f;
-    const float targetWetMix  = std::clamp(currentProgram_.balance, 0.0f, 100.0f) * 0.01f;
-    const float targetOutGain = std::clamp(currentProgram_.outLevel, 0.0f, 100.0f) * 0.01f;
-    const float internalSr = static_cast<float>(converter_.getInternalClockHz());
-    constexpr float kSmoothCoeff = 0.004f; // ~5.5 ms zipper-free smoothing at 44.1/48 kHz
-    constexpr float kFadeStep = 0.0032f;   // ~7 ms smooth VCA duck & recovery on preset recall
+    const float targetWetMix    = std::clamp(currentProgram_.balance, 0.0f, 100.0f) * 0.01f;
+    const float targetOutGain   = std::clamp(currentProgram_.outLevel, 0.0f, 100.0f) * 0.01f;
+    const float targetBypassEnv = hardwareBypass_ ? 0.0f : 1.0f;
+    const float targetMonoMix   = monoInputMode_ ? 1.0f : 0.0f;
+    const float internalSr      = static_cast<float>(converter_.getInternalClockHz());
 
     for (int i = 0; i < numSamples; ++i) {
-        smoothInputGain_ += kSmoothCoeff * (inputGainLinear_ - smoothInputGain_);
-        smoothWetMix_    += kSmoothCoeff * (targetWetMix - smoothWetMix_);
-        smoothOutGain_   += kSmoothCoeff * (targetOutGain - smoothOutGain_);
+        smoothInputGain_ += smoothCoeff_ * (inputGainLinear_ - smoothInputGain_);
+        smoothWetMix_    += smoothCoeff_ * (targetWetMix - smoothWetMix_);
+        smoothOutGain_   += smoothCoeff_ * (targetOutGain - smoothOutGain_);
+        smoothBypassEnv_ += smoothCoeff_ * (targetBypassEnv - smoothBypassEnv_);
+        smoothMonoMix_   += smoothCoeff_ * (targetMonoMix - smoothMonoMix_);
 
         // Handle click-free SPX90 program switch VCA ducking & DRAM clear
         if (hasPendingProgramSwitch_) {
-            recallWetEnv_ -= kFadeStep;
+            recallWetEnv_ -= fadeStep_;
             if (recallWetEnv_ <= 0.0f) {
                 recallWetEnv_ = 0.0f;
                 modDelayEngine_.reset();
@@ -240,31 +246,25 @@ void Spx90DspEngine::processBlock(float* leftChannel, float* rightChannel, int n
                 hasPendingProgramSwitch_ = false;
             }
         } else if (recallWetEnv_ < 1.0f) {
-            recallWetEnv_ = std::min(1.0f, recallWetEnv_ + kFadeStep);
+            recallWetEnv_ = std::min(1.0f, recallWetEnv_ + fadeStep_);
         }
 
-        float inL = leftChannel[i] * smoothInputGain_;
-        float inR = (rightChannel ? rightChannel[i] : leftChannel[i]) * smoothInputGain_;
+        float rawInL = leftChannel[i] * smoothInputGain_;
+        float rawInR = (rightChannel ? rightChannel[i] : leftChannel[i]) * smoothInputGain_;
 
-        if (monoInputMode_) {
-            float m = 0.5f * (inL + inR);
-            inL = inR = m;
-        }
+        float monoIn = 0.5f * (rawInL + rawInR);
+        float inL = rawInL + smoothMonoMix_ * (monoIn - rawInL);
+        float inR = rawInR + smoothMonoMix_ * (monoIn - rawInR);
 
         float absMax = std::max(std::abs(inL), std::abs(inR));
         if (absMax > blockPeak) blockPeak = absMax;
-
-        if (hardwareBypass_) {
-            leftChannel[i] = inL;
-            if (rightChannel) rightChannel[i] = inR;
-            continue;
-        }
 
         float dryL = inL;
         float dryR = inR;
         float wetL = inL;
         float wetR = inR;
 
+        // Always tick converter & DSP tanks even during bypass so reverb/delay tails stay warm
         converter_.processSampleFrame(wetL, wetR, [this, internalSr](float& dl, float& dr) {
             processInternalDspTick(dl, dr, internalSr);
         });
@@ -274,21 +274,36 @@ void Spx90DspEngine::processBlock(float* leftChannel, float* rightChannel, int n
 
         const float dryMix = 1.0f - smoothWetMix_;
 
-        // SPX90 Output Mixer: parallel analog dry + reconstructed DAC wet * outLevel
-        float finalL = (dryL * dryMix + wetL * smoothWetMix_) * smoothOutGain_;
-        float finalR = (dryR * dryMix + wetR * smoothWetMix_) * smoothOutGain_;
+        // SPX90 Output Mixer: parallel analog dry + reconstructed DAC wet * outLevel, crossfaded with bypass
+        float activeL = (dryL * dryMix + wetL * smoothWetMix_) * smoothOutGain_;
+        float activeR = (dryR * dryMix + wetR * smoothWetMix_) * smoothOutGain_;
+
+        float finalL = inL + smoothBypassEnv_ * (activeL - inL);
+        float finalR = inR + smoothBypassEnv_ * (activeR - inR);
+
+        // Non-finite output safety guard
+        if (!std::isfinite(finalL) || !std::isfinite(finalR)) {
+            converter_.reset();
+            modDelayEngine_.reset();
+            eqPanFreezeEngine_.reset();
+            reverbEngine_.reset();
+            pitchEngine_.reset();
+            finalL = 0.0f;
+            finalR = 0.0f;
+        }
 
         leftChannel[i] = finalL;
         if (rightChannel) rightChannel[i] = finalR;
     }
 
-    // Smooth peak meter decay for the front-panel 7-LED bargraph
+    // Time-based peak meter decay (~180 ms time constant, independent of host buffer size)
+    const float blockDecay = std::exp(-static_cast<float>(numSamples) / static_cast<float>(0.180 * hostSampleRate_));
     float prevPeak = peakInputLevel_.load(std::memory_order_relaxed);
-    float newPeak = (blockPeak > prevPeak) ? blockPeak : (prevPeak * 0.88f);
+    float newPeak = std::max(blockPeak, prevPeak * blockDecay);
     peakInputLevel_.store(newPeak, std::memory_order_relaxed);
 
     if (converter_.consumeOverflowFlag() || blockPeak > 0.95f) {
-        overflowHoldSamples_ = 8000;
+        overflowHoldSamples_ = static_cast<int>(0.165 * hostSampleRate_);
         overflowLed_.store(true, std::memory_order_relaxed);
     } else if (overflowHoldSamples_ > 0) {
         overflowHoldSamples_ -= numSamples;

@@ -85,6 +85,7 @@ struct ParamMeta {
     float step = 1.0f;
     ParamFormat format = ParamFormat::IntPercent;
     bool active = false;
+    bool scalesWithRam = false;
 };
 
 constexpr int kMaxProgramParams = 8;

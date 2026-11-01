@@ -176,14 +176,14 @@ private:
                 int baseLenR = std::clamp(static_cast<int>(kBaseCombR[i] * scale), 64, 4000);
                 float gL = std::pow(10.0f, (-3.0f * static_cast<float>(baseLenL)) / (revTime * sr));
                 float gR = std::pow(10.0f, (-3.0f * static_cast<float>(baseLenR)) / (revTime * sr));
-                cachedCombGainL_[i] = std::clamp(gL, 0.1f, 0.985f);
-                cachedCombGainR_[i] = std::clamp(gR, 0.1f, 0.985f);
+                cachedCombGainL_[i] = std::clamp(gL, 0.1f, 0.9975f);
+                cachedCombGainR_[i] = std::clamp(gR, 0.1f, 0.9975f);
             }
         }
 
         lfo_.tick(sr);
-        int modOffsetL = static_cast<int>(lfo_.getOutput(0).bipolar * 3.0f);
-        int modOffsetR = static_cast<int>(lfo_.getOutput(1).bipolar * 3.0f);
+        float modOffsetL = lfo_.getOutput(0).bipolar * 3.0f;
+        float modOffsetR = lfo_.getOutput(1).bipolar * 3.0f;
 
         float monoIn = 0.5f * (l + r);
         preDelayBuf_[preDelayWrite_] = quantizeWord(monoIn);
@@ -220,24 +220,32 @@ private:
         const float damp = 0.15f + 0.80f * highDamp;
 
         for (size_t i = 0; i < kNumCombs; ++i) {
-            int lenL = std::clamp(static_cast<int>(kBaseCombL[i] * scale) + ((i == 0) ? modOffsetL : 0), 64, 4000);
-            int lenR = std::clamp(static_cast<int>(kBaseCombR[i] * scale) + ((i == 1) ? modOffsetR : 0), 64, 4000);
+            float dlyL = std::clamp(static_cast<float>(kBaseCombL[i]) * scale + ((i == 0) ? modOffsetL : 0.0f), 64.0f, 4000.0f);
+            float dlyR = std::clamp(static_cast<float>(kBaseCombR[i]) * scale + ((i == 1) ? modOffsetR : 0.0f), 64.0f, 4000.0f);
 
             const float gL = cachedCombGainL_[i];
             const float gR = cachedCombGainR_[i];
 
-            size_t idxL = combIdxL_[i];
-            float yL = combBufL_[i][idxL];
+            size_t wL = combIdxL_[i];
+            int intDlyL = static_cast<int>(dlyL);
+            float fracL = dlyL - static_cast<float>(intDlyL);
+            size_t rL0 = (wL - static_cast<size_t>(intDlyL)) & 4095u;
+            size_t rL1 = (rL0 - 1) & 4095u;
+            float yL = combBufL_[i][rL0] + fracL * (combBufL_[i][rL1] - combBufL_[i][rL0]);
             combFilterL_[i] += damp * (yL - combFilterL_[i]);
-            combBufL_[i][idxL] = quantizeWord(xL + combFilterL_[i] * gL);
-            combIdxL_[i] = (idxL + 1 >= static_cast<size_t>(lenL)) ? 0 : (idxL + 1);
+            combBufL_[i][wL] = std::clamp(xL + combFilterL_[i] * gL, -1.5f, 1.5f);
+            combIdxL_[i] = (wL + 1) & 4095u;
             sumL += yL;
 
-            size_t idxR = combIdxR_[i];
-            float yR = combBufR_[i][idxR];
+            size_t wR = combIdxR_[i];
+            int intDlyR = static_cast<int>(dlyR);
+            float fracR = dlyR - static_cast<float>(intDlyR);
+            size_t rR0 = (wR - static_cast<size_t>(intDlyR)) & 4095u;
+            size_t rR1 = (rR0 - 1) & 4095u;
+            float yR = combBufR_[i][rR0] + fracR * (combBufR_[i][rR1] - combBufR_[i][rR0]);
             combFilterR_[i] += damp * (yR - combFilterR_[i]);
-            combBufR_[i][idxR] = quantizeWord(xR + combFilterR_[i] * gR);
-            combIdxR_[i] = (idxR + 1 >= static_cast<size_t>(lenR)) ? 0 : (idxR + 1);
+            combBufR_[i][wR] = std::clamp(xR + combFilterR_[i] * gR, -1.5f, 1.5f);
+            combIdxR_[i] = (wR + 1) & 4095u;
             sumR += yR;
         }
 

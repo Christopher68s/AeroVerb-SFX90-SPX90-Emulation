@@ -4,6 +4,7 @@
 #include "DramBuffer.h"
 #include "ConverterEngine.h"
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <algorithm>
 
@@ -74,7 +75,7 @@ public:
 
     void setMidiNote(int midiNote, int velocity) {
         if (velocity > 0) {
-            activeMidiNote_ = midiNote;
+            activeMidiNote_.store(midiNote, std::memory_order_relaxed);
         }
     }
 
@@ -111,8 +112,9 @@ private:
         float fbGain  = std::clamp(p[3], -99.0f, 99.0f) * 0.009f;
         int baseKey   = static_cast<int>(std::round(p[4]));
 
-        if (baseKey >= 36 && activeMidiNote_ >= 0) {
-            semi = std::clamp(static_cast<float>(activeMidiNote_ - baseKey), -24.0f, 24.0f);
+        int midiNote = activeMidiNote_.load(std::memory_order_relaxed);
+        if (baseKey >= 36 && midiNote >= 0) {
+            semi = std::clamp(static_cast<float>(midiNote - baseKey), -24.0f, 24.0f);
         }
 
         float monoIn = 0.5f * (l + r);
@@ -193,8 +195,9 @@ private:
         float fbGainR = std::clamp(p[5], -99.0f, 99.0f) * 0.009f;
         int baseKey   = static_cast<int>(std::round(p[6]));
 
-        if (baseKey >= 36 && activeMidiNote_ >= 0) {
-            float offset = static_cast<float>(activeMidiNote_ - baseKey);
+        int midiNote = activeMidiNote_.load(std::memory_order_relaxed);
+        if (baseKey >= 36 && midiNote >= 0) {
+            float offset = static_cast<float>(midiNote - baseKey);
             semiL = std::clamp(semiL + offset, -24.0f, 24.0f);
             semiR = std::clamp(semiR + offset, -24.0f, 24.0f);
         }
@@ -217,7 +220,7 @@ private:
     VintagePitchVoice voice2_{};
     BiquadFilter toneFilter_{};
     float fbL_ = 0.0f, fbR_ = 0.0f;
-    int activeMidiNote_ = 60;
+    std::atomic<int> activeMidiNote_{60};
     RamModel ramModel_ = RamModel::Spx90_MkI;
 };
 

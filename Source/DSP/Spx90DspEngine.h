@@ -68,6 +68,12 @@ private:
     float smoothInputGain_ = 1.0f;
     float smoothWetMix_ = 0.5f;
     float smoothOutGain_ = 1.0f;
+    float smoothBypassEnv_ = 1.0f;
+    float smoothMonoMix_ = 0.0f;
+
+    double hostSampleRate_ = 48000.0;
+    float smoothCoeff_ = 0.004f;
+    float fadeStep_ = 0.0032f;
 
     std::atomic<float> peakInputLevel_{0.0f};
     std::atomic<bool> overflowLed_{false};
